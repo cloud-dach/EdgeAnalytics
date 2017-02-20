@@ -1,47 +1,39 @@
-import java.io.File;
+package com.ibm.demo;
 
 import org.apache.edgent.function.Consumer;
-import org.apache.edgent.providers.direct.DirectProvider;
 import org.apache.edgent.topology.TStream;
 import org.apache.edgent.topology.TWindow;
-import org.apache.edgent.topology.Topology;
-import org.apache.edgent.connectors.iotp.*;
 import org.apache.edgent.analytics.math3.json.JsonAnalytics;
-import org.apache.edgent.connectors.iot.*;
 import org.apache.edgent.analytics.math3.stat.Statistic;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
+import com.ibm.iot.analytics.edgesdk.api.connectors.StringConnector;
+import java.util.concurrent.TimeUnit;
 import com.pi4j.io.gpio.*;
 import com.pi4j.wiringpi.GpioUtil;
 
-public class RangeSensor implements Runnable {
-
+public class RangeSensor extends StringConnector implements Runnable {
+	
     private static final Double SPEED_OF_SOUND = 343.0;
     private GpioController gpio = GpioFactory.getInstance();
     private Pin echoRPin = RaspiPin.GPIO_27;
     private Pin trigRPin = RaspiPin.GPIO_26;
     GpioPinDigitalInput echoPin = null;
     GpioPinDigitalOutput trigPin = null; 
-
     private Consumer<Double> eventSubmitter;
     private Thread t;
-    static AtomicReference<Double> thresholdRef = new AtomicReference<>(0.40);
     
-    public static void main(String[] args) throws Exception {
-
-        String deviceCfg = args[0];
-        DirectProvider dp = new DirectProvider();
-        Topology topology = dp.newTopology();
-
-        IotDevice device = new IotpDevice(topology, new File(deviceCfg)); 
-
-        RangeSensor sensor = new RangeSensor();
-
+    public RangeSensor() {
+        GpioUtil.enableNonPrivilegedAccess();
+        echoPin = gpio.provisionDigitalInputPin(echoRPin);
+        trigPin = gpio.provisionDigitalOutputPin(trigRPin);
+    }
+    
+	@Override
+	public org.apache.edgent.topology.TStream<java.lang.String> getStream(org.apache.edgent.topology.Topology t) {
         //poll Range sensor every second for distance reading
-        TStream<Double> distanceReadings = device.topology().events(eventSubmitter -> sensor.register(eventSubmitter));
-
+        TStream<Double> distanceReadings = t.events(eventSubmitter -> register(eventSubmitter));
+       
         //filter out bad readings that are out of the sensor's 1000cm range
         distanceReadings = distanceReadings.filter(j -> j < 1.00);
 
@@ -59,27 +51,11 @@ public class RangeSensor implements Runnable {
         // across each window independently.
         sensorJSON = JsonAnalytics.aggregate(sensorWindow, "name", "reading", Statistic.MIN, Statistic.MAX, Statistic.MEAN, Statistic.STDDEV);
 
-        // Filter so that only when the mean sensor reading is that an object is closer than threshold send data. 
-        sensorJSON = sensorJSON.filter(j -> (j.get("reading") != null &&
-                                             j.get("reading").getAsJsonObject().get("MEAN") != null &&
-                                             Math.abs(j.get("reading").getAsJsonObject().get("MEAN").getAsDouble()) < thresholdRef.get()));
-
-        // Send the device streams as IoTF device events
-        // with event identifier "sensors".
-        device.events(sensorJSON, "sensors", QoS.FIRE_AND_FORGET);
-        
-        device.commands("setMode").sink(json -> sensor.processCommand(json.get(IotDevice.CMD_PAYLOAD).getAsJsonObject()));
-        
-        distanceReadings.print();
-        
-        dp.submit(topology);
-    }
-
-    public RangeSensor() {
-        GpioUtil.enableNonPrivilegedAccess();
-        echoPin = gpio.provisionDigitalInputPin(echoRPin);
-        trigPin = gpio.provisionDigitalOutputPin(trigRPin);
-    }
+        TStream<JsonObject> results = sensorJSON.map(v -> {
+        	return v.get("reading").getAsJsonObject();
+        });
+		return results.asString();
+	}
 
     public void register(Consumer<Double> eventSubmitter) {
         this.eventSubmitter = eventSubmitter;
@@ -88,9 +64,10 @@ public class RangeSensor implements Runnable {
         t.setPriority(Thread.NORM_PRIORITY + 1);
         t.start();
     }
-    
-    @Override
-    public void run() {
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
         System.out.println("Start reader thread!");
         
         while (true) {
@@ -103,20 +80,8 @@ public class RangeSensor implements Runnable {
             }
 
         }
-    }
-
-    public void processCommand(JsonObject json) {
-        
-        System.out.println("cmd:-------");
-        System.out.println(json.toString());
-        
-        if (json.get("threshold") != null) {
-        double threshold = json.get("threshold").getAsDouble();
-          System.out.println("new threshold: " + String.valueOf(threshold));
-          thresholdRef.set(threshold);
-        }
-    }
-    
+	}
+	
     private Double getDistance() {
 
         trigPin.low();
